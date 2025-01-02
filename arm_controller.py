@@ -6,180 +6,166 @@ from threading import Lock
 
 class RoboticArmController:
     def __init__(self):
-        # Initialize serial connection with your settings
-        try:
-            self.printer = serial.Serial(
-                port='/dev/tty.usbmodem1301',
-                baudrate=250000,
-                timeout=1
-            )
-            time.sleep(2)
-            
-            self.command_lock = Lock()  # Add lock for thread safety
-            
-            # Initialize and get firmware info
-            self.send_gcode('M115')
-            
-        except Exception as e:
-            messagebox.showerror("Connection Error", f"Could not connect to printer: {str(e)}")
-            raise
-        
-        # Create main window
-        self.root = tk.Tk()
-        self.root.title("MK2 Robotic Arm Controller")
-        
-        # Initialize position variables
+        # Initialize variables
         self.current_x = 0
         self.current_y = 0
         self.current_z = 0
-        self.speed = 1000
-        self.is_moving = False
+        self.speed = 1000  # Default speed
         
-        # Create control frames
-        self.create_axis_controls()
-        self.create_movement_controls()
-        self.create_speed_control()
+        # Create main window
+        self.root = tk.Tk()
+        self.root.title("Robotic Arm Control")
         
-        # Send initial setup
-        self.send_startup_commands()
-    
-    def send_gcode(self, command):
-        """Send G-code command with proper termination and wait"""
-        with self.command_lock:
-            self.printer.write(f"{command}\n".encode())
-            self.printer.flush()
-            
-            # Wait for acknowledgment
-            response = self.printer.readline().decode().strip()
-            while response.startswith('echo:') or response.startswith('debug:'):
-                response = self.printer.readline().decode().strip()
-            
-            return response
-    
-    def create_axis_controls(self):
-        axis_frame = ttk.LabelFrame(self.root, text="Axis Controls")
-        axis_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
+        # Create all control sections
+        self.create_status_display()
+        self.create_homing_control()
+        self.create_manual_control()
+        self.create_tracking_control()
+        
+        # Initialize serial connection
+        self.serial = None
+        self.connect_to_printer()
+
+    def create_status_display(self):
+        """Create status display frame"""
+        status_frame = ttk.LabelFrame(self.root, text="Status")
+        status_frame.grid(row=0, column=0, padx=10, pady=5, sticky="nsew")
         
         # Position display
-        self.pos_label = ttk.Label(axis_frame, text="Position: X:0 Y:0 Z:0")
-        self.pos_label.grid(row=0, column=0, columnspan=3, pady=5)
-        
-        # X-axis controls
-        ttk.Label(axis_frame, text="X-Axis").grid(row=1, column=0, pady=5)
-        ttk.Button(axis_frame, text="+X", command=lambda: self.move_axis('X', 5)).grid(row=1, column=1)
-        ttk.Button(axis_frame, text="-X", command=lambda: self.move_axis('X', -5)).grid(row=1, column=2)
-        
-        # Y-axis controls
-        ttk.Label(axis_frame, text="Y-Axis").grid(row=2, column=0, pady=5)
-        ttk.Button(axis_frame, text="+Y", command=lambda: self.move_axis('Y', 5)).grid(row=2, column=1)
-        ttk.Button(axis_frame, text="-Y", command=lambda: self.move_axis('Y', -5)).grid(row=2, column=2)
-        
-        # Z-axis controls
-        ttk.Label(axis_frame, text="Z-Axis").grid(row=3, column=0, pady=5)
-        ttk.Button(axis_frame, text="+Z", command=lambda: self.move_axis('Z', 5)).grid(row=3, column=1)
-        ttk.Button(axis_frame, text="-Z", command=lambda: self.move_axis('Z', -5)).grid(row=3, column=2)
-    
-    def move_axis(self, axis, distance):
-        """Improved move_axis function with better command handling"""
-        if self.is_moving:
-            return
-            
-        # Check limits
-        new_pos = getattr(self, f'current_{axis.lower()}') + distance
-        if axis in ['X', 'Y'] and abs(new_pos) > 50:
-            messagebox.showwarning("Limit Warning", f"{axis} axis movement exceeds 50mm limit")
-            return
-        elif axis == 'Z' and abs(new_pos) > 300:
-            messagebox.showwarning("Limit Warning", "Z axis movement exceeds 300mm limit")
-            return
-        
-        try:
-            self.is_moving = True
-            
-            # Send relative positioning command
-            self.send_gcode("G91")  # Set to relative positioning
-            
-            # Send movement command
-            self.send_gcode(f"G1 {axis}{distance} F{self.speed}")
-            
-            # Update stored position
-            setattr(self, f'current_{axis.lower()}', new_pos)
-            
-            # Return to absolute positioning
-            self.send_gcode("G90")
-            
-            # Update position display
-            self.pos_label.config(
-                text=f"Position: X:{self.current_x:.1f} Y:{self.current_y:.1f} Z:{self.current_z:.1f}"
-            )
-            
-        except Exception as e:
-            messagebox.showerror("Movement Error", f"Error moving {axis} axis: {str(e)}")
-        finally:
-            self.is_moving = False
-    
-    def create_movement_controls(self):
-        movement_frame = ttk.LabelFrame(self.root, text="Movement Controls")
-        movement_frame.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
-        
-        ttk.Button(movement_frame, text="Home All", command=self.home_all).grid(row=0, column=0, pady=5, padx=5)
-        ttk.Button(movement_frame, text="Emergency Stop", command=self.emergency_stop).grid(row=0, column=1, pady=5, padx=5)
-    
-    def create_speed_control(self):
-        speed_frame = ttk.LabelFrame(self.root, text="Speed Control")
-        speed_frame.grid(row=3, column=0, padx=10, pady=5, sticky="nsew")
-        
-        self.speed_scale = ttk.Scale(
-            speed_frame,
-            from_=1,
-            to=50,
-            orient='horizontal',
-            command=self.update_speed
+        self.pos_label = ttk.Label(
+            status_frame,
+            text=f"Position: X:{self.current_x:.1f} Y:{self.current_y:.1f} Z:{self.current_z:.1f}"
         )
-        self.speed_scale.set(10)
-        self.speed_scale.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        self.pos_label.grid(row=0, column=0, padx=5, pady=5)
+
+    def create_homing_control(self):
+        """Create homing control frame"""
+        homing_frame = ttk.LabelFrame(self.root, text="Homing")
+        homing_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
         
-        self.speed_label = ttk.Label(speed_frame, text="Speed: 10 mm/s")
-        self.speed_label.grid(row=0, column=1, padx=5, pady=5)
-    
-    def update_speed(self, value):
-        self.speed = float(value) * 60
-        self.speed_label.config(text=f"Speed: {float(value):.1f} mm/s")
-    
-    def send_startup_commands(self):
-        commands = [
-            'G21',  # Set units to millimeters
-            'G90',  # Set absolute positioning
-            'M203 X50 Y50 Z50',  # Set max feedrates
-            'M201 X50 Y50 Z50'   # Set max acceleration
-        ]
-        for cmd in commands:
-            self.send_gcode(cmd)
-    
+        home_all_btn = ttk.Button(
+            homing_frame,
+            text="Home All",
+            command=self.home_all
+        )
+        home_all_btn.grid(row=0, column=0, padx=5, pady=5)
+
+    def create_manual_control(self):
+        """Create manual control frame"""
+        manual_frame = ttk.LabelFrame(self.root, text="Manual Control")
+        manual_frame.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
+        
+        # Axis control buttons
+        axes = ['X', 'Y', 'Z']
+        for i, axis in enumerate(axes):
+            ttk.Label(manual_frame, text=f"{axis} Axis:").grid(row=i, column=0, padx=5, pady=5)
+            
+            ttk.Button(
+                manual_frame,
+                text="-",
+                command=lambda a=axis: self.move_axis(a, -1)
+            ).grid(row=i, column=1, padx=5, pady=5)
+            
+            ttk.Button(
+                manual_frame,
+                text="+",
+                command=lambda a=axis: self.move_axis(a, 1)
+            ).grid(row=i, column=2, padx=5, pady=5)
+
+    def create_tracking_control(self):
+        """Create tracking control frame"""
+        tracking_frame = ttk.LabelFrame(self.root, text="Head Tracking")
+        tracking_frame.grid(row=3, column=0, padx=10, pady=5, sticky="nsew")
+        
+        # Create button frame
+        button_frame = ttk.Frame(tracking_frame)
+        button_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        self.tracking_button = ttk.Button(
+            button_frame,
+            text="Start Tracking",
+            command=self.start_tracking_callback
+        )
+        self.tracking_button.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        self.stop_tracking_button = ttk.Button(
+            button_frame,
+            text="Stop Tracking",
+            command=self.stop_tracking_callback,
+            state='disabled'
+        )
+        self.stop_tracking_button.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+
+    def start_tracking_callback(self):
+        """Callback for tracking button"""
+        if hasattr(self, 'tracking_callback'):
+            print("Start tracking button pressed")
+            self.tracking_button.config(state='disabled')
+            self.stop_tracking_button.config(state='normal')
+            self.tracking_callback()
+
+    def stop_tracking_callback(self):
+        """Callback for stop tracking button"""
+        if hasattr(self, 'stop_tracking_callback'):
+            print("Stop tracking button pressed")
+            self.tracking_button.config(state='normal')
+            self.stop_tracking_button.config(state='disabled')
+            self.stop_tracking_callback()
+
     def home_all(self):
+        """Home all axes"""
+        self.send_gcode("G28")  # Home all axes
+        self.current_x = 0
+        self.current_y = 0
+        self.current_z = 0
+        self.update_position_display()
+
+    def move_axis(self, axis, direction):
+        """Move specified axis by 1mm in given direction"""
+        distance = direction * 1  # 1mm movement
+        self.send_gcode(f"G91")  # Relative positioning
+        self.send_gcode(f"G1 {axis}{distance} F{self.speed}")
+        self.send_gcode(f"G90")  # Back to absolute positioning
+        
+        # Update current position
+        if axis == 'X':
+            self.current_x += distance
+        elif axis == 'Y':
+            self.current_y += distance
+        elif axis == 'Z':
+            self.current_z += distance
+        
+        self.update_position_display()
+
+    def update_position_display(self):
+        """Update position display label"""
+        self.pos_label.config(
+            text=f"Position: X:{self.current_x:.1f} Y:{self.current_y:.1f} Z:{self.current_z:.1f}"
+        )
+
+    def send_gcode(self, command):
+        """Send G-code command to printer"""
+        if self.serial:
+            try:
+                self.serial.write(f"{command}\n".encode())
+                print(f"Sent: {command}")
+            except Exception as e:
+                print(f"Error sending command: {e}")
+
+    def connect_to_printer(self):
+        """Connect to the 3D printer"""
         try:
-            self.send_gcode('G28')
-            self.current_x = 0
-            self.current_y = 0
-            self.current_z = 0
-            self.pos_label.config(text="Position: X:0 Y:0 Z:0")
+            import serial
+            from config import SERIAL_PORT, BAUD_RATE
+            
+            print(f"Attempting to connect to {SERIAL_PORT} at {BAUD_RATE} baud")
+            self.serial = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            print(f"Successfully connected to printer on {SERIAL_PORT}")
+            
         except Exception as e:
-            messagebox.showerror("Homing Error", f"Error during homing: {str(e)}")
-    
-    def emergency_stop(self):
-        try:
-            self.send_gcode('M112')
-            messagebox.showwarning("Emergency Stop", "Emergency stop activated!")
-        except Exception as e:
-            messagebox.showerror("Emergency Stop Error", f"Error during emergency stop: {str(e)}")
-    
-    def run(self):
-        self.root.mainloop()
-    
-    def __del__(self):
-        if hasattr(self, 'printer'):
-            self.printer.close()
+            print(f"Failed to connect to printer: {e}")
+            self.serial = None  # Ensure serial is None if connection fails
 
 if __name__ == "__main__":
     controller = RoboticArmController()
-    controller.run() 
+    controller.root.mainloop() 
