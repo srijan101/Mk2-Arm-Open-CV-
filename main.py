@@ -25,11 +25,11 @@ class MainController:
         self.camera_enabled = False
         self.cap = None
         
-        # Modify movement parameters
+        # Adjust movement parameters for smoother motion
         self.max_z_travel = 100  # maximum travel distance in mm for Z
-        self.step_size = 1  # move 1mm at a time
+        self.step_size = 5  # increase step size for smoother motion
         self.last_movement_time = 0
-        self.movement_cooldown = 0.05
+        self.movement_cooldown = 0.02  # reduce cooldown time
         self.home_position = {'Z': 50}  # Center position
         self.current_position = {'Z': 50}  # Start at center, not 0
         
@@ -127,20 +127,19 @@ class MainController:
                         new_pos = max(0, min(new_pos, self.max_z_travel))
                         
                         print(f"Moving Z by {step}mm")
-                        # Use the existing working move_axis method
                         self.arm.send_gcode("G91")  # Relative positioning
-                        time.sleep(0.1)  # Wait for mode change
+                        time.sleep(0.05)  # Reduced wait time
                         
-                        self.arm.send_gcode(f"G1 Z{step} F{self.arm.speed}")
-                        time.sleep(0.2)  # Wait for movement
+                        # Increase feedrate for faster movement
+                        self.arm.send_gcode(f"G1 Z{step} F1000")  # Increased speed
+                        time.sleep(0.1)  # Reduced wait time
                         
                         self.arm.send_gcode("G90")  # Back to absolute positioning
-                        time.sleep(0.1)
+                        time.sleep(0.05)  # Reduced wait time
                         
                         self.current_position['Z'] = new_pos
-                        print(f"Movement completed. New Z position: {new_pos}mm")
                     
-                    self.last_movement_time = current_time + 0.3  # Add extra delay between movements
+                    self.last_movement_time = current_time + 0.1  # Reduced delay between movements
                     
                 except Exception as e:
                     print(f"Error during movement: {e}")
@@ -166,7 +165,7 @@ class MainController:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
             
             # Display the frame
-            cv2.imshow('Palm Tracking', frame)
+            cv2.imshow('Palm Tracking', frame) 
             key = cv2.waitKey(1)
             if key == 27:  # ESC key
                 self.stop_camera()
