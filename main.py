@@ -85,8 +85,9 @@ class MainController:
         """Initialize camera with specified settings"""
         try:
             self.cap = cv2.VideoCapture(CAMERA_INDEX)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+            # Increase frame size
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  # Larger width
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)  # Larger height
             self.camera_enabled = True
             print("Camera initialized successfully")
         except Exception as e:
@@ -147,7 +148,7 @@ class MainController:
                 self.last_servo_command_time = current_time
             elif not is_palm_open and self.servo_open:
                 print("Closing gripper")
-                self.arm.send_gcode("M280 P0 S180")  # Closed position (180 degrees)
+                self.arm.send_gcode("M280 P0 S190")  # Closed position (180 degrees)
                 self.servo_open = False
                 self.last_servo_command_time = current_time
         except Exception as e:
@@ -199,6 +200,9 @@ class MainController:
             ret, frame = self.cap.read()
             if not ret:
                 return
+            
+            # Flip the frame horizontally
+            frame = cv2.flip(frame, 1)
                 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(frame_rgb)
@@ -229,9 +233,10 @@ class MainController:
                 self.control_gripper(is_palm_open)
                 
                 # Use palm_y to control both X and Y together
-                xy_position = self.map_palm_to_position(palm_y, 'X')  # Use Y position for both axes
+                xy_position = self.map_palm_to_position(palm_y, 'X')
                 target_x = xy_position
-                target_y = xy_position  # Same position as X for synchronized movement
+                target_y = xy_position
+                # Changed back to original Z-axis mapping
                 target_z = self.map_palm_to_position(palm_x, 'Z')
                 
                 # Add deadzone in the center to prevent jitter
@@ -316,14 +321,32 @@ class MainController:
             # Draw center line (home position)
             cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
             
-            # Display information
-            cv2.putText(frame, f"Target - XY:{target_x:.1f} Z:{target_z:.1f} "
-                        f"Gripper:{'Open' if self.servo_open else 'Closed'}", 
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Current - XY:{self.current_position['X']:.1f} Z:{self.current_position['Z']:.1f}", 
-                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, status_text, (w - 250, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+            # Enhanced parameter display
+            # Create a dark semi-transparent overlay for parameters
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (10, h-160), (400, h-10), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+            
+            # Display parameters with more detail
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            line_height = 30
+            start_y = h - 140
+            
+            params = [
+                f"Target Position:",
+                f"  X/Y: {target_x:.1f} mm",
+                f"  Z: {target_z:.1f} mm",
+                f"Current Position:",
+                f"  X: {self.current_position['X']:.1f} mm",
+                f"  Y: {self.current_position['Y']:.1f} mm",
+                f"  Z: {self.current_position['Z']:.1f} mm",
+                f"Gripper: {'Open' if self.servo_open else 'Closed'}",
+                f"Status: {'Hand Detected' if results.multi_hand_landmarks else 'No Hand'}"
+            ]
+            
+            for i, text in enumerate(params):
+                cv2.putText(frame, text, (20, start_y + i*line_height), 
+                           font, 0.6, (255, 255, 255), 1)
             
             # Display the frame
             cv2.imshow('Palm Tracking', frame) 
