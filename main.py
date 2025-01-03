@@ -37,6 +37,11 @@ class MainController:
         
         # Add initialization flag
         self.is_initialized = False
+        
+        # Add servo state tracking
+        self.servo_open = True  # True = open (0°), False = closed (180°)
+        self.last_servo_command_time = 0
+        self.servo_cooldown = 0.5  # 500ms cooldown for servo commands
     
     def initialize_arm_position(self):
         """Initialize arm position by homing and moving to center"""
@@ -126,6 +131,65 @@ class MainController:
             return self.ensure_within_limits(axis, mapped_pos)
         return 0
 
+    def control_gripper(self, is_palm_open):
+        """Control servo gripper based on palm state"""
+        current_time = time.time()
+        
+        # Check cooldown to prevent rapid servo commands
+        if current_time - self.last_servo_command_time < self.servo_cooldown:
+            return
+            
+        try:
+            if is_palm_open and not self.servo_open:
+                print("Opening gripper")
+                self.arm.send_gcode("M280 P0 S0")  # Open position (0 degrees)
+                self.servo_open = True
+                self.last_servo_command_time = current_time
+            elif not is_palm_open and self.servo_open:
+                print("Closing gripper")
+                self.arm.send_gcode("M280 P0 S180")  # Closed position (180 degrees)
+                self.servo_open = False
+                self.last_servo_command_time = current_time
+        except Exception as e:
+            print(f"Error controlling gripper: {e}")
+
+    def detect_palm_state(self, hand_landmarks):
+        """Detect if palm is open or closed based on finger positions"""
+        # Points for all finger tips and their corresponding middle joints
+        finger_tips = [8, 12, 16, 20]  # Index, Middle, Ring, Pinky fingertips
+        finger_mids = [6, 10, 14, 18]  # Corresponding middle joints
+        thumb_tip = 4
+        thumb_mid = 2
+        
+        # Count bent fingers
+        bent_fingers = 0
+        
+        # Check each finger
+        for tip, mid in zip(finger_tips, finger_mids):
+            tip_point = hand_landmarks.landmark[tip]
+            mid_point = hand_landmarks.landmark[mid]
+            
+            # If fingertip is below middle joint, finger is considered bent
+            if tip_point.y > mid_point.y:
+                bent_fingers += 1
+        
+        # Special check for thumb
+        thumb_tip_point = hand_landmarks.landmark[thumb_tip]
+        thumb_mid_point = hand_landmarks.landmark[thumb_mid]
+        
+        # If thumb tip is more to the right than its mid point (for right hand)
+        # or more to the left (for left hand), it's considered bent
+        if abs(thumb_tip_point.x - thumb_mid_point.x) < 0.05:
+            bent_fingers += 1
+            
+        # Consider palm closed if at least 4 fingers are bent
+        is_closed = bent_fingers >= 4
+        
+        # Debug information
+        print(f"Bent fingers: {bent_fingers}, Palm {'Closed' if is_closed else 'Open'}")
+        
+        return not is_closed  # Return True for open palm, False for closed fist
+
     def process_hand_movement(self):
         """Process palm position and control X, Y, Z axis movement"""
         if not self.camera_enabled or self.cap is None or not self.is_initialized:
@@ -160,6 +224,10 @@ class MainController:
                 palm_x = hand_landmarks.landmark[0].x
                 palm_y = hand_landmarks.landmark[0].y
                 
+                # Detect palm state and control gripper
+                is_palm_open = self.detect_palm_state(hand_landmarks)
+                self.control_gripper(is_palm_open)
+                
                 # Use palm_y to control both X and Y together
                 xy_position = self.map_palm_to_position(palm_y, 'X')  # Use Y position for both axes
                 target_x = xy_position
@@ -178,7 +246,8 @@ class MainController:
                 if abs(target_z - center_z) < (self.max_z_travel * deadzone):
                     target_z = center_z
                 
-                status_text = (f"Status: XY:{xy_position:.1f} Z:{target_z:.1f}")
+                status_text = (f"Status: XY:{xy_position:.1f} Z:{target_z:.1f} "
+                             f"Gripper:{'Open' if is_palm_open else 'Closed'}")
                 status_color = (0, 255, 0)
                 
                 # Draw position indicators on frame
@@ -248,7 +317,8 @@ class MainController:
             cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
             
             # Display information
-            cv2.putText(frame, f"Target - XY:{target_x:.1f} Z:{target_z:.1f}", 
+            cv2.putText(frame, f"Target - XY:{target_x:.1f} Z:{target_z:.1f} "
+                        f"Gripper:{'Open' if self.servo_open else 'Closed'}", 
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, f"Current - XY:{self.current_position['X']:.1f} Z:{self.current_position['Z']:.1f}", 
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
