@@ -166,6 +166,14 @@ class RoboticArmController:
             print(f"Failed to connect to printer: {e}")
             self.serial = None  # Ensure serial is None if connection fails
 
+    def send_command(self, command):
+        """Send a direct G-code command to the printer"""
+        if hasattr(self, 'printer') and self.printer:
+            self.printer.write(f"{command}\n".encode())
+            response = self.printer.readline().decode().strip()
+            return response
+        return None
+
 if __name__ == "__main__":
     controller = RoboticArmController()
     controller.root.mainloop() 
