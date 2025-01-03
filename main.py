@@ -25,10 +25,11 @@ class MainController:
         self.camera_enabled = False
         self.cap = None
         
-        # Update movement parameters with correct distances
-        self.max_z_travel = 100  # maximum travel distance in mm for Z
-        self.max_xy_travel = 50  # maximum travel distance in mm for X and Y
-        self.step_size = 5  # step size for smooth motion
+        # Update correct travel limits
+        self.max_xy_travel = 50   # maximum travel distance in mm for X and Y
+        self.max_z_travel = 200   # maximum travel distance in mm for Z
+        self.min_travel = 0       # minimum travel distance for all axes
+        self.step_size = 5        # step size for smooth motion
         self.last_movement_time = 0
         self.movement_cooldown = 0.02
         self.home_position = {'X': 25, 'Y': 25, 'Z': 50}  # Center position (25mm for X/Y, 50mm for Z)
@@ -87,6 +88,44 @@ class MainController:
             print(f"Camera initialization failed: {e}")
             self.camera_enabled = False
     
+    def ensure_within_limits(self, axis, value):
+        """Ensure the target position is within axis limits"""
+        if axis in ['X', 'Y']:
+            return max(self.min_travel, min(value, self.max_xy_travel))
+        elif axis == 'Z':
+            return max(self.min_travel, min(value, self.max_z_travel))
+        return value
+
+    def calculate_step(self, current, target, axis):
+        """Calculate safe step size considering limits"""
+        if abs(target - current) < self.step_size:
+            return 0
+        
+        step = self.step_size if target > current else -self.step_size
+        next_pos = current + step
+        
+        # Check if next position would exceed limits
+        if axis in ['X', 'Y']:
+            if not (0 <= next_pos <= self.max_xy_travel):
+                return 0
+        elif axis == 'Z':
+            if not (0 <= next_pos <= self.max_z_travel):
+                return 0
+                
+        return step
+
+    def map_palm_to_position(self, palm_pos, axis):
+        """Map palm position (0-1) to axis position considering limits"""
+        if axis in ['X', 'Y']:
+            # Map palm position to axis range (0-50)
+            mapped_pos = palm_pos * self.max_xy_travel
+            return self.ensure_within_limits(axis, mapped_pos)
+        elif axis == 'Z':
+            # Map palm position to Z range (0-200)
+            mapped_pos = palm_pos * self.max_z_travel
+            return self.ensure_within_limits(axis, mapped_pos)
+        return 0
+
     def process_hand_movement(self):
         """Process palm position and control X, Y, Z axis movement"""
         if not self.camera_enabled or self.cap is None or not self.is_initialized:
@@ -117,32 +156,35 @@ class MainController:
             if results.multi_hand_landmarks:
                 hand_landmarks = results.multi_hand_landmarks[0]
                 
-                # Get palm center coordinates
+                # Get palm center coordinates (0-1 range)
                 palm_x = hand_landmarks.landmark[0].x
                 palm_y = hand_landmarks.landmark[0].y
                 
-                # Determine if palm is up or down (palm_y ranges from 0 at top to 1 at bottom)
-                palm_y_threshold = 0.5  # Middle of the camera view (vertical)
-                palm_x_threshold = 0.5  # Middle of the camera view (horizontal)
+                # Use palm_y to control both X and Y together
+                xy_position = self.map_palm_to_position(palm_y, 'X')  # Use Y position for both axes
+                target_x = xy_position
+                target_y = xy_position  # Same position as X for synchronized movement
+                target_z = self.map_palm_to_position(palm_x, 'Z')
                 
-                # X and Y movement based on palm height (FLIPPED LOGIC)
-                if palm_y < palm_y_threshold:  # Palm is in upper half
-                    target_x = 0   # Move to minimum
-                    target_y = 0   # Move to minimum
-                else:  # Palm is in lower half
-                    target_x = 50  # Move to maximum
-                    target_y = 50  # Move to maximum
+                # Add deadzone in the center to prevent jitter
+                deadzone = 0.1  # 10% deadzone around center
+                center_xy = self.max_xy_travel / 2
+                center_z = self.max_z_travel / 2
                 
-                # Z movement based on palm left/right position
-                if palm_x < palm_x_threshold:  # Palm is in left half
-                    target_z = 0   # Move Z to minimum
-                else:  # Palm is in right half
-                    target_z = 100 # Move Z to maximum
+                # Apply deadzone to both X and Y together
+                if abs(xy_position - center_xy) < (self.max_xy_travel * deadzone):
+                    target_x = center_xy
+                    target_y = center_xy
+                if abs(target_z - center_z) < (self.max_z_travel * deadzone):
+                    target_z = center_z
                 
-                status_text = (f"Status: Palm {'UP' if palm_y < palm_y_threshold else 'DOWN'}, "
-                             f"{'RIGHT' if palm_x >= palm_x_threshold else 'LEFT'} "
-                             f"X:{target_x} Y:{target_y} Z:{target_z}")
+                status_text = (f"Status: XY:{xy_position:.1f} Z:{target_z:.1f}")
                 status_color = (0, 255, 0)
+                
+                # Draw position indicators on frame
+                h, w = frame.shape[:2]
+                cv2.circle(frame, (int(palm_x * w), int(palm_y * h)), 10, (0, 255, 255), -1)
+                
             else:
                 # When no hand detected, stay at current position
                 target_x = self.current_position['X']
@@ -154,12 +196,12 @@ class MainController:
             # Process movement if enough time has passed
             if current_time - self.last_movement_time >= self.movement_cooldown:
                 try:
-                    # Calculate steps for all axes
+                    # Calculate safe steps for all axes
                     steps = {}
-                    for axis, target in zip(['X', 'Y', 'Z'], [target_x, target_y, target_z]):
+                    for axis, target in [('X', target_x), ('Y', target_y), ('Z', target_z)]:
                         current = self.current_position[axis]
-                        if abs(target - current) >= self.step_size:
-                            step = self.step_size if target > current else -self.step_size
+                        step = self.calculate_step(current, target, axis)
+                        if step != 0:
                             steps[axis] = step
 
                     if steps:
@@ -171,7 +213,7 @@ class MainController:
                         move_cmd = "G1"
                         for axis, step in steps.items():
                             move_cmd += f" {axis}{step}"
-                        move_cmd += " F1000"  # Set feedrate to 1000
+                        move_cmd += " F2000"
                         self.arm.send_gcode(move_cmd)
                         time.sleep(0.1)
                         
@@ -180,10 +222,10 @@ class MainController:
                         
                         # Update current positions
                         for axis, step in steps.items():
-                            self.current_position[axis] = max(0, min(
-                                self.current_position[axis] + step,
-                                self.max_xy_travel if axis in ['X', 'Y'] else self.max_z_travel
-                            ))
+                            self.current_position[axis] = self.ensure_within_limits(
+                                axis,
+                                self.current_position[axis] + step
+                            )
                     
                     self.last_movement_time = current_time + 0.1
                     
@@ -206,7 +248,9 @@ class MainController:
             cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
             
             # Display information
-            cv2.putText(frame, f"X:{self.current_position['X']} Y:{self.current_position['Y']} Z:{self.current_position['Z']}", 
+            cv2.putText(frame, f"Target - XY:{target_x:.1f} Z:{target_z:.1f}", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, f"Current - XY:{self.current_position['X']:.1f} Z:{self.current_position['Z']:.1f}", 
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, status_text, (w - 250, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
