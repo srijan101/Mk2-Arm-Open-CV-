@@ -25,13 +25,14 @@ class MainController:
         self.camera_enabled = False
         self.cap = None
         
-        # Adjust movement parameters for smoother motion
+        # Update movement parameters with correct distances
         self.max_z_travel = 100  # maximum travel distance in mm for Z
-        self.step_size = 5  # increase step size for smoother motion
+        self.max_xy_travel = 50  # maximum travel distance in mm for X and Y
+        self.step_size = 5  # step size for smooth motion
         self.last_movement_time = 0
-        self.movement_cooldown = 0.02  # reduce cooldown time
-        self.home_position = {'Z': 50}  # Center position
-        self.current_position = {'Z': 50}  # Start at center, not 0
+        self.movement_cooldown = 0.02
+        self.home_position = {'X': 25, 'Y': 25, 'Z': 50}  # Center position (25mm for X/Y, 50mm for Z)
+        self.current_position = {'X': 25, 'Y': 25, 'Z': 50}  # Start at center
         
         # Add initialization flag
         self.is_initialized = False
@@ -41,16 +42,25 @@ class MainController:
         try:
             print("Initializing arm position...")
             
-            # Home all axes (sets to 0)
+            # Home all axes
             print("Homing all axes...")
             self.arm.home_all()
-            time.sleep(2)  # Wait for homing to complete
+            time.sleep(2)
             
-            # Move directly to center position (50mm for Z)
-            print("Moving to center position...")
+            # Move X and Y to center position simultaneously
+            print("Moving X and Y to center position...")
+            move_cmd = f"G1 X{self.home_position['X']} Y{self.home_position['Y']} F1000"
+            self.arm.send_gcode(move_cmd)
+            time.sleep(1)
+            
+            # Move Z axis to center position
+            print("Moving Z to center position...")
             self.arm.move_axis('Z', self.home_position['Z'])
+            
+            # Update current positions
+            self.current_position['X'] = self.home_position['X']
+            self.current_position['Y'] = self.home_position['Y']
             self.current_position['Z'] = self.home_position['Z']
-            time.sleep(0.5)
             
             self.is_initialized = True
             print("Arm initialization complete!")
@@ -78,7 +88,7 @@ class MainController:
             self.camera_enabled = False
     
     def process_hand_movement(self):
-        """Process palm position and control Z-axis movement"""
+        """Process palm position and control X, Y, Z axis movement"""
         if not self.camera_enabled or self.cap is None or not self.is_initialized:
             return
             
@@ -93,24 +103,50 @@ class MainController:
             h, w = frame.shape[:2]
             current_time = time.time()
             
+            # Draw screen division lines first (before any hand processing)
+            # Vertical center line
+            cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
+            # Horizontal center line
+            cv2.line(frame, (0, h//2), (w, h//2), (0, 255, 0), 2)
+            
             # Initialize default values
+            target_x = self.home_position['X']  # Default to home position
+            target_y = self.home_position['Y']  # Default to home position
             target_z = self.home_position['Z']  # Default to home position
             
             if results.multi_hand_landmarks:
                 hand_landmarks = results.multi_hand_landmarks[0]
                 
-                # Get palm center and map it relative to screen center
+                # Get palm center coordinates
                 palm_x = hand_landmarks.landmark[0].x
-                # Map palm position (0-1) to Z range (0-100), with center at 50
-                target_z = int(palm_x * self.max_z_travel)
+                palm_y = hand_landmarks.landmark[0].y
                 
-                # Ensure target is within bounds
-                target_z = max(0, min(target_z, self.max_z_travel))
+                # Determine if palm is up or down (palm_y ranges from 0 at top to 1 at bottom)
+                palm_y_threshold = 0.5  # Middle of the camera view (vertical)
+                palm_x_threshold = 0.5  # Middle of the camera view (horizontal)
                 
-                status_text = f"Status: Palm at {target_z}mm"
+                # X and Y movement based on palm height (FLIPPED LOGIC)
+                if palm_y < palm_y_threshold:  # Palm is in upper half
+                    target_x = 0   # Move to minimum
+                    target_y = 0   # Move to minimum
+                else:  # Palm is in lower half
+                    target_x = 50  # Move to maximum
+                    target_y = 50  # Move to maximum
+                
+                # Z movement based on palm left/right position
+                if palm_x < palm_x_threshold:  # Palm is in left half
+                    target_z = 0   # Move Z to minimum
+                else:  # Palm is in right half
+                    target_z = 100 # Move Z to maximum
+                
+                status_text = (f"Status: Palm {'UP' if palm_y < palm_y_threshold else 'DOWN'}, "
+                             f"{'RIGHT' if palm_x >= palm_x_threshold else 'LEFT'} "
+                             f"X:{target_x} Y:{target_y} Z:{target_z}")
                 status_color = (0, 255, 0)
             else:
-                # When no hand detected, stay at current position instead of moving
+                # When no hand detected, stay at current position
+                target_x = self.current_position['X']
+                target_y = self.current_position['Y']
                 target_z = self.current_position['Z']
                 status_text = "Status: No Palm Detected - Holding Position"
                 status_color = (0, 0, 255)
@@ -118,28 +154,38 @@ class MainController:
             # Process movement if enough time has passed
             if current_time - self.last_movement_time >= self.movement_cooldown:
                 try:
-                    # Z axis movement
-                    current_z = self.current_position['Z']
-                    if abs(target_z - current_z) >= self.step_size:
-                        # Determine direction
-                        step = self.step_size if target_z > current_z else -self.step_size
-                        new_pos = current_z + step
-                        new_pos = max(0, min(new_pos, self.max_z_travel))
-                        
-                        print(f"Moving Z by {step}mm")
+                    # Calculate steps for all axes
+                    steps = {}
+                    for axis, target in zip(['X', 'Y', 'Z'], [target_x, target_y, target_z]):
+                        current = self.current_position[axis]
+                        if abs(target - current) >= self.step_size:
+                            step = self.step_size if target > current else -self.step_size
+                            steps[axis] = step
+
+                    if steps:
+                        print(f"Moving: {steps}")
                         self.arm.send_gcode("G91")  # Relative positioning
-                        time.sleep(0.05)  # Reduced wait time
+                        time.sleep(0.05)
                         
-                        # Increase feedrate for faster movement
-                        self.arm.send_gcode(f"G1 Z{step} F1000")  # Increased speed
-                        time.sleep(0.1)  # Reduced wait time
+                        # Combine movements into a single G-code command
+                        move_cmd = "G1"
+                        for axis, step in steps.items():
+                            move_cmd += f" {axis}{step}"
+                        move_cmd += " F1000"  # Set feedrate to 1000
+                        self.arm.send_gcode(move_cmd)
+                        time.sleep(0.1)
                         
                         self.arm.send_gcode("G90")  # Back to absolute positioning
-                        time.sleep(0.05)  # Reduced wait time
+                        time.sleep(0.05)
                         
-                        self.current_position['Z'] = new_pos
+                        # Update current positions
+                        for axis, step in steps.items():
+                            self.current_position[axis] = max(0, min(
+                                self.current_position[axis] + step,
+                                self.max_xy_travel if axis in ['X', 'Y'] else self.max_z_travel
+                            ))
                     
-                    self.last_movement_time = current_time + 0.1  # Reduced delay between movements
+                    self.last_movement_time = current_time + 0.1
                     
                 except Exception as e:
                     print(f"Error during movement: {e}")
@@ -149,17 +195,18 @@ class MainController:
                 mp_drawing = mp.solutions.drawing_utils
                 mp_drawing.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
                 
-                # Draw palm position indicator
-                normalized_x = int(w * palm_x)
-                cv2.circle(frame, (normalized_x, h//2), 10, (0, 255, 255), -1)
+                # Draw screen division lines
+                h, w = frame.shape[:2]
+                # Vertical center line
+                cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
+                # Horizontal center line
+                cv2.line(frame, (0, h//2), (w, h//2), (0, 255, 0), 2)
             
             # Draw center line (home position)
             cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 2)
             
             # Display information
-            cv2.putText(frame, f"Target Z: {target_z}mm", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Current Z: {self.current_position['Z']}", 
+            cv2.putText(frame, f"X:{self.current_position['X']} Y:{self.current_position['Y']} Z:{self.current_position['Z']}", 
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, status_text, (w - 250, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
